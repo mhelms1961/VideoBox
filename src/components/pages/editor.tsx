@@ -69,7 +69,100 @@ export default function VideoBorderEditor() {
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [showVideoEditor, setShowVideoEditor] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [cloudinaryUrl, setCloudinaryUrl] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Upload to Cloudinary
+  const uploadToCloudinary = useCallback(
+    async (file: File) => {
+      if (
+        !import.meta.env.VITE_CLOUDINARY_CLOUD_NAME ||
+        !import.meta.env.VITE_CLOUDINARY_API_KEY
+      ) {
+        toast({
+          title: "Configuration Error",
+          description: "Cloudinary API keys are not configured properly.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      setIsUploading(true);
+      setUploadProgress(0);
+
+      try {
+        // Create a FormData instance
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("upload_preset", "video_borders"); // Create this unsigned upload preset in your Cloudinary dashboard
+        formData.append(
+          "cloud_name",
+          import.meta.env.VITE_CLOUDINARY_CLOUD_NAME,
+        );
+
+        // Use XMLHttpRequest for progress tracking
+        const xhr = new XMLHttpRequest();
+        xhr.open(
+          "POST",
+          `https://api.cloudinary.com/v1_1/${import.meta.env.VITE_CLOUDINARY_CLOUD_NAME}/video/upload`,
+        );
+
+        // Track upload progress
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable) {
+            const percentComplete = Math.round(
+              (event.loaded / event.total) * 100,
+            );
+            setUploadProgress(percentComplete);
+          }
+        };
+
+        // Handle response
+        xhr.onload = () => {
+          if (xhr.status === 200) {
+            const response = JSON.parse(xhr.responseText);
+            setCloudinaryUrl(response.secure_url);
+            toast({
+              title: "Upload Successful",
+              description: "Your video has been uploaded to Cloudinary.",
+              variant: "default",
+            });
+            // Navigate to editor with the video file and cloudinary URL
+            navigate("/editor", {
+              state: { videoFile: file, cloudinaryUrl: response.secure_url },
+            });
+          } else {
+            throw new Error("Upload failed");
+          }
+          setIsUploading(false);
+        };
+
+        // Handle errors
+        xhr.onerror = () => {
+          toast({
+            title: "Upload Failed",
+            description:
+              "There was an error uploading your video to Cloudinary.",
+            variant: "destructive",
+          });
+          setIsUploading(false);
+        };
+
+        // Send the request
+        xhr.send(formData);
+      } catch (error) {
+        console.error("Error uploading to Cloudinary:", error);
+        toast({
+          title: "Upload Failed",
+          description: "There was an error uploading your video to Cloudinary.",
+          variant: "destructive",
+        });
+        setIsUploading(false);
+      }
+    },
+    [toast, navigate],
+  );
 
   // Handle checkout process
   const handleCheckout = async (priceId: string) => {
@@ -335,15 +428,32 @@ export default function VideoBorderEditor() {
                     </div>
                   </div>
                   <div className="p-6">
-                    <div className="relative aspect-video bg-gray-100 rounded-md overflow-hidden border-8 border-white shadow-md">
+                    <div
+                      className="relative aspect-video bg-gray-100 rounded-md overflow-hidden border-8 border-white shadow-md cursor-pointer group transition-all duration-300 hover:border-black hover:scale-[1.02] hover:shadow-xl"
+                      onClick={() =>
+                        window.open(
+                          `/tempobook/storyboards/da71efbd-f795-49ff-874d-b3313df0fe4d`,
+                          "_blank",
+                        )
+                      }
+                      title="Click to open video editor"
+                    >
                       <img
                         src="https://images.unsplash.com/photo-1518806118471-f28b20a1d79d?w=800&q=80"
                         alt="Video preview with border"
-                        className="w-full h-full object-cover"
+                        className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
                       />
                       <div className="absolute inset-0 flex items-center justify-center">
                         <div className="h-12 w-12 rounded-full bg-black/70 flex items-center justify-center">
                           <Video className="h-6 w-6 text-white" />
+                        </div>
+                      </div>
+                      <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-all duration-300 flex items-center justify-center">
+                        <div className="bg-black/80 text-white px-6 py-3 rounded-md flex items-center gap-2 transform scale-90 group-hover:scale-100 transition-transform duration-300">
+                          <Video className="h-5 w-5" />
+                          <span className="text-base font-medium">
+                            Open Video Editor
+                          </span>
                         </div>
                       </div>
                     </div>

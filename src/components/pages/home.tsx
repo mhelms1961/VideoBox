@@ -473,16 +473,33 @@ export default function BorderPostLanding() {
                       </div>
                     </div>
                   </div>
-                  <div className="p-6 bg-gray-800">
-                    <div className="relative aspect-video bg-gray-100 rounded-md overflow-hidden border-8 border-white shadow-md">
+                  <div className="p-6">
+                    <div
+                      className="relative aspect-video bg-gray-100 rounded-md overflow-hidden border-8 border-white shadow-md cursor-pointer group transition-all duration-300 hover:border-black hover:scale-[1.02] hover:shadow-xl"
+                      onClick={() =>
+                        window.open(
+                          `/tempobook/storyboards/da71efbd-f795-49ff-874d-b3313df0fe4d`,
+                          "_blank",
+                        )
+                      }
+                      title="Click to open video editor"
+                    >
                       <img
                         src="https://images.unsplash.com/photo-1518806118471-f28b20a1d79d?w=800&q=80"
                         alt="Video preview with border"
-                        className="w-full h-full object-cover"
+                        className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
                       />
                       <div className="absolute inset-0 flex items-center justify-center">
                         <div className="h-12 w-12 rounded-full bg-black/70 flex items-center justify-center">
                           <Video className="h-6 w-6 text-white" />
+                        </div>
+                      </div>
+                      <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-all duration-300 flex items-center justify-center">
+                        <div className="bg-black/80 text-white px-6 py-3 rounded-md flex items-center gap-2 transform scale-90 group-hover:scale-100 transition-transform duration-300">
+                          <Video className="h-5 w-5" />
+                          <span className="text-base font-medium">
+                            Open Video Editor
+                          </span>
                         </div>
                       </div>
                     </div>

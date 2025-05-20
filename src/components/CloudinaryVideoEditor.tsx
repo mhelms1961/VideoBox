@@ -1,4 +1,9 @@
 import { useState, useRef, useCallback, useMemo, memo, useEffect } from "react";
+import {
+  checkCloudinaryUrl,
+  generateAlternativeUrls,
+} from "@/lib/cloudinaryDebug";
+import CloudinaryDebugPanel from "@/components/CloudinaryDebugPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
@@ -31,6 +36,7 @@ import {
   Image,
   Type,
   Sliders,
+  AlertCircle,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
@@ -119,10 +125,15 @@ function CloudinaryVideoEditor({
   const [isPlaying, setIsPlaying] = useState(false);
   const [videoDuration, setVideoDuration] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [debugMode, setDebugMode] = useState(false);
+  const [videoLoadAttempts, setVideoLoadAttempts] = useState(0);
+  const [videoLoadError, setVideoLoadError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [activeTab, setActiveTab] = useState("upload");
   const [cachedVideoUrl, setCachedVideoUrl] = useState<string | null>(null);
+  const stableTimestampRef = useRef<number>(Date.now());
+  const hasSetTabRef = useRef(false);
 
   // Default transformations
   const [transformations, setTransformations] = useState<VideoTransformations>({
@@ -283,7 +294,16 @@ function CloudinaryVideoEditor({
       }
     }
 
-    return video.toURL();
+    // Force format to mp4 for maximum compatibility
+    video = video.format("mp4");
+
+    // Add quality auto for better performance
+    video = video.quality("auto");
+
+    // Generate the URL and add a timestamp to prevent caching
+    const url = video.toURL();
+    console.log("Generated transformed URL:", url);
+    return `${url}&_t=${stableTimestampRef.current}`;
   }, [
     cloudinaryPublicId,
     JSON.stringify(transformations),
@@ -294,22 +314,32 @@ function CloudinaryVideoEditor({
 
   // Get transformed video URL with memoization to prevent recalculation on every render
   const transformedVideoUrl = useMemo(() => {
-    console.log(
-      "Generating transformed URL with publicId:",
-      cloudinaryPublicId,
-    );
-    const url = cloudinaryPublicId ? getTransformedVideoUrl() : cloudinaryUrl;
-    console.log("Generated transformed URL:", url);
-    return url;
+    if (!cloudinaryPublicId || !cloudinaryUrl) return cloudinaryUrl;
+
+    // For direct playback, use the secure_url without transformations initially
+    if (cloudinaryUrl && cloudinaryUrl.includes("res.cloudinary.com")) {
+      // Use a fixed timestamp instead of Date.now() to prevent constant re-renders
+      return `${cloudinaryUrl.split("?")[0]}?_t=${stableTimestampRef.current}`;
+    }
+
+    return getTransformedVideoUrl();
   }, [cloudinaryPublicId, getTransformedVideoUrl, cloudinaryUrl]);
 
-  // Update cached URL when transformations change
-  useMemo(() => {
+  // Update cached URL when transformations change - use useEffect instead of useMemo
+  useEffect(() => {
     if (transformedVideoUrl) {
-      console.log("Setting cached video URL:", transformedVideoUrl);
       setCachedVideoUrl(transformedVideoUrl);
+
+      // Force video reload when transformations change
+      if (
+        videoRef.current &&
+        (activeTab === "edit" || activeTab === "preview")
+      ) {
+        videoRef.current.src = transformedVideoUrl;
+        videoRef.current.load();
+      }
     }
-  }, [transformedVideoUrl]);
+  }, [transformedVideoUrl, activeTab]);
 
   // Handle file selection
   const handleFileChange = useCallback(
@@ -336,9 +366,45 @@ function CloudinaryVideoEditor({
 
     const file = e.dataTransfer.files?.[0];
     if (file && file.type.startsWith("video/")) {
-      setVideoFile(file);
-      setActiveTab("upload");
-      setUploadError(null);
+      // Create a test video element to check if the file is valid
+      const testVideo = document.createElement("video");
+      const objectUrl = URL.createObjectURL(file);
+
+      testVideo.onloadedmetadata = () => {
+        // File is valid, proceed
+        console.log("Dropped video file validated successfully");
+        URL.revokeObjectURL(objectUrl);
+        setVideoFile(file);
+        setActiveTab("upload");
+        setUploadError(null);
+      };
+
+      testVideo.onerror = () => {
+        // File is invalid
+        console.error("Invalid dropped video file");
+        URL.revokeObjectURL(objectUrl);
+        setUploadError(
+          "The dropped file appears to be corrupted or is not a valid video format",
+        );
+      };
+
+      // Set a timeout in case the video never loads
+      const timeout = setTimeout(() => {
+        testVideo.onloadedmetadata = null;
+        testVideo.onerror = null;
+        URL.revokeObjectURL(objectUrl);
+        setUploadError(
+          "Unable to validate the video file. It may be corrupted or in an unsupported format.",
+        );
+      }, 5000);
+
+      testVideo.onloadeddata = () => {
+        clearTimeout(timeout);
+        testVideo.onloadedmetadata();
+      };
+
+      // Set source to test the file
+      testVideo.src = objectUrl;
     } else {
       setUploadError("Please drop a valid video file");
     }
@@ -373,13 +439,19 @@ function CloudinaryVideoEditor({
       formData.append("file", videoFile);
       formData.append("upload_preset", "video_borders"); // Make sure this preset exists in your Cloudinary dashboard
       formData.append("resource_type", "video"); // Explicitly set resource type to video
+      formData.append("access_mode", "public"); // Ensure the uploaded asset is publicly accessible
       formData.append("cloud_name", cloudName);
+      // Add timestamp to prevent caching issues
+      formData.append("timestamp", Date.now().toString());
+      // Add public flag to ensure the resource is publicly accessible
+      formData.append("public_id", `video_${Date.now()}`);
+      formData.append("access_mode", "public");
 
       // Use XMLHttpRequest for progress tracking
       const xhr = new XMLHttpRequest();
       xhr.open(
         "POST",
-        `https://api.cloudinary.com/v1_1/${cloudName}/auto/upload`,
+        `https://api.cloudinary.com/v1_1/${cloudName}/video/upload`,
       );
 
       // Set CORS headers
@@ -406,27 +478,88 @@ function CloudinaryVideoEditor({
               console.log("Setting cloudinary URL:", response.secure_url);
               console.log("Setting cloudinary public ID:", response.public_id);
 
-              // Store the URL and public ID
+              // Store the secure_url and public ID
               setCloudinaryUrl(response.secure_url);
               setCloudinaryPublicId(response.public_id);
 
-              // Set cached URL immediately
-              setCachedVideoUrl(response.secure_url);
+              // Verify the resource exists and is accessible before switching tabs
+              const timestampedUrl = `${response.secure_url}?_t=${stableTimestampRef.current}`;
+              console.log(
+                "Verifying uploaded resource accessibility:",
+                timestampedUrl,
+              );
 
-              // Add a delay before switching tabs to ensure state is updated
-              setTimeout(() => {
-                setActiveTab("edit");
-                console.log("Switched to edit tab");
+              checkCloudinaryUrl(timestampedUrl)
+                .then((errorInfo) => {
+                  if (errorInfo.status >= 200 && errorInfo.status < 300) {
+                    console.log("Resource verified as accessible:", errorInfo);
 
-                // Force video element to reload after tab switch
-                setTimeout(() => {
-                  if (videoRef.current) {
-                    console.log("Forcing video reload after tab switch");
-                    videoRef.current.src = response.secure_url;
-                    videoRef.current.load();
+                    // Set cached URL immediately with timestamped URL
+                    setCachedVideoUrl(timestampedUrl);
+                    setVideoLoadError(null);
+                    setVideoLoadAttempts(0);
+
+                    // Switch to edit tab immediately with a forced timeout
+                    console.log("About to switch to edit tab");
+                    setTimeout(() => {
+                      setActiveTab("edit");
+                      console.log("Switched to edit tab");
+
+                      // Force video element to reload after tab switch
+                      setTimeout(() => {
+                        if (videoRef.current) {
+                          // Use the secure_url from Cloudinary
+                          console.log(
+                            "Forcing video reload after tab switch with secure URL:",
+                            response.secure_url,
+                          );
+                          videoRef.current.src = response.secure_url;
+                          videoRef.current.load();
+                        }
+                      }, 300);
+                    }, 100);
+                  } else {
+                    console.error("Resource not accessible:", errorInfo);
+                    setDebugMode(true);
+                    setVideoLoadError(
+                      `Resource not accessible (Status: ${errorInfo.status}). ${errorInfo.cloudinaryError || ""}`,
+                    );
+
+                    // Try alternative URLs
+                    const alternatives = generateAlternativeUrls(
+                      response.secure_url,
+                    );
+                    console.log("Trying alternative URLs:", alternatives);
+
+                    // Try the first alternative immediately
+                    if (alternatives.length > 0) {
+                      setCachedVideoUrl(alternatives[0]);
+                    } else {
+                      // If no alternatives, still try to proceed with original URL
+                      setCachedVideoUrl(response.secure_url);
+                    }
+
+                    // Always switch to edit tab regardless of resource accessibility
+                    setTimeout(() => {
+                      setActiveTab("edit");
+                      console.log(
+                        "Forced tab change to edit after resource check failed",
+                      );
+                    }, 100);
                   }
-                }, 500);
-              }, 1000);
+                })
+                .catch((err) => {
+                  console.error("Error verifying resource:", err);
+                  // Still try to proceed even if verification fails
+                  setCachedVideoUrl(response.secure_url);
+                  // Force tab change even if verification fails
+                  setTimeout(() => {
+                    setActiveTab("edit");
+                    console.log(
+                      "Forced tab change to edit after verification failed",
+                    );
+                  }, 100);
+                });
             } else {
               console.error(
                 "Missing secure_url or public_id in response",
@@ -451,8 +584,28 @@ function CloudinaryVideoEditor({
 
       // Handle errors
       xhr.onerror = () => {
-        setUploadError("Network error during upload");
+        console.error("Network error during upload");
+        setUploadError(
+          "Network error during upload. Please check your connection and try again.",
+        );
         setIsUploading(false);
+      };
+
+      // Set a timeout to prevent hanging uploads
+      const uploadTimeout = setTimeout(() => {
+        if (xhr.readyState !== 4) {
+          xhr.abort();
+          console.error("Upload timed out");
+          setUploadError("Upload timed out. Please try again.");
+          setIsUploading(false);
+        }
+      }, 60000); // 60 second timeout
+
+      // Clear timeout when request completes
+      xhr.onreadystatechange = () => {
+        if (xhr.readyState === 4) {
+          clearTimeout(uploadTimeout);
+        }
       };
 
       // Send the request
@@ -513,6 +666,12 @@ function CloudinaryVideoEditor({
             })
             .catch((error) => {
               console.error("Auto-play was prevented:", error);
+              // Even if autoplay fails, we still want to show the video is ready
+              if (videoRef.current) {
+                console.log(
+                  "Setting video ready state despite autoplay failure",
+                );
+              }
             });
         }
       } catch (error) {
@@ -540,204 +699,425 @@ function CloudinaryVideoEditor({
     ],
   );
 
-  // Force re-render when tab changes
-  useEffect(() => {
-    if (activeTab === "edit" && videoRef.current && cachedVideoUrl) {
-      console.log("Edit tab activated, forcing video reload");
-      videoRef.current.src = cachedVideoUrl;
-      videoRef.current.load();
-    }
-  }, [activeTab, cachedVideoUrl]);
+  // Load video when tab changes to edit - use a stable timestamp
+  const tabChangeTimeoutRef = useRef<number | null>(null);
 
-  // Debug log whenever cloudinaryUrl changes
   useEffect(() => {
-    console.log("cloudinaryUrl changed to:", cloudinaryUrl);
+    if (activeTab === "edit" && videoRef.current) {
+      // Use transformed URL to ensure adjustments are visible
+      const videoUrl = transformedVideoUrl || cachedVideoUrl || cloudinaryUrl;
+      if (videoUrl) {
+        // Reset error state when switching tabs
+        setVideoLoadError(null);
+        setVideoLoadAttempts(0);
+
+        // Load the video with transformations
+        videoRef.current.src = videoUrl;
+        videoRef.current.load();
+      }
+    }
+
+    // Clear any existing timeout
+    if (tabChangeTimeoutRef.current) {
+      clearTimeout(tabChangeTimeoutRef.current);
+      tabChangeTimeoutRef.current = null;
+    }
+  }, [activeTab, transformedVideoUrl, cachedVideoUrl, cloudinaryUrl]);
+
+  // Force tab change if we have a cloudinaryUrl but are still on upload tab
+  // Only run this once when cloudinaryUrl or cachedVideoUrl first becomes available
+  useEffect(() => {
+    if ((cloudinaryUrl || cachedVideoUrl) && !hasSetTabRef.current) {
+      hasSetTabRef.current = true;
+      setActiveTab("edit");
+    }
+  }, [cloudinaryUrl, cachedVideoUrl]);
+
+  // Simplified check to ensure video loads properly
+  useEffect(() => {
+    if (
+      activeTab === "edit" &&
+      videoRef.current &&
+      (cloudinaryUrl || cachedVideoUrl) &&
+      cloudinaryPublicId
+    ) {
+      // Set a timeout to check if video is loaded properly
+      const checkVideoTimeout = setTimeout(() => {
+        if (videoRef.current && videoRef.current.readyState === 0) {
+          // Try loading with direct URL from Cloudinary without any transformations
+          const directUrl = `https://res.cloudinary.com/${cloudName}/video/upload/${cloudinaryPublicId}`;
+          videoRef.current.src = directUrl;
+          videoRef.current.load();
+        }
+      }, 3000); // Check after 3 seconds
+
+      return () => clearTimeout(checkVideoTimeout);
+    }
+  }, [activeTab, cloudinaryPublicId, cloudName]);
+
+  // Set cached URL from cloudinaryUrl if needed
+  useEffect(() => {
     if (cloudinaryUrl && !cachedVideoUrl) {
-      console.log("Setting cached URL from cloudinaryUrl");
       setCachedVideoUrl(cloudinaryUrl);
     }
   }, [cloudinaryUrl, cachedVideoUrl]);
 
-  // Debug log whenever cachedVideoUrl changes
-  useEffect(() => {
-    console.log("cachedVideoUrl changed to:", cachedVideoUrl);
-  }, [cachedVideoUrl]);
+  // Use a stable component structure to prevent flickering
+  return (
+    <div className="bg-white rounded-lg shadow-lg">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+        <TabsList className="grid w-full grid-cols-3">
+          <TabsTrigger value="upload">Upload</TabsTrigger>
+          <TabsTrigger value="edit" disabled={!cloudinaryUrl}>
+            Edit
+          </TabsTrigger>
+          <TabsTrigger value="preview" disabled={!cloudinaryUrl}>
+            Preview
+          </TabsTrigger>
+        </TabsList>
 
-  // Memoize the entire component to prevent unnecessary re-renders during pan/zoom
-  return useMemo(
-    () => (
-      <div className="bg-white rounded-lg shadow-lg">
-        <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-          <TabsList className="grid w-full grid-cols-3">
-            <TabsTrigger value="upload">Upload</TabsTrigger>
-            <TabsTrigger value="edit" disabled={!cloudinaryUrl}>
-              Edit
-            </TabsTrigger>
-            <TabsTrigger value="preview" disabled={!cloudinaryUrl}>
-              Preview
-            </TabsTrigger>
-          </TabsList>
-
-          {/* Upload Tab */}
-          <TabsContent value="upload" className="p-6">
-            <div className="space-y-6">
-              <div>
-                <h2 className="text-2xl font-bold mb-2">Upload Video</h2>
-                <p className="text-gray-600 mb-4">
-                  Upload a video to start editing with Cloudinary
-                </p>
-              </div>
-
-              <div
-                className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center cursor-pointer hover:bg-gray-50 transition-colors"
-                onDragOver={handleDragOver}
-                onDrop={handleDrop}
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <input
-                  type="file"
-                  ref={fileInputRef}
-                  onChange={handleFileChange}
-                  accept="video/*"
-                  className="hidden"
-                />
-                <Upload className="h-12 w-12 mx-auto text-gray-400 mb-4" />
-                <h3 className="text-lg font-medium mb-2">
-                  Drag and drop or click to upload
-                </h3>
-                <p className="text-gray-500 mb-4">
-                  MP4, MOV, or AVI up to 100MB
-                </p>
-
-                {videoFile && (
-                  <div className="mt-4 p-3 bg-gray-100 rounded-md flex items-center justify-between">
-                    <div className="flex items-center">
-                      <video
-                        className="h-12 w-20 object-cover rounded mr-3"
-                        src={URL.createObjectURL(videoFile)}
-                      />
-                      <div className="text-left">
-                        <p className="font-medium truncate max-w-xs">
-                          {videoFile.name}
-                        </p>
-                        <p className="text-xs text-gray-500">
-                          {(videoFile.size / (1024 * 1024)).toFixed(2)} MB
-                        </p>
-                      </div>
-                    </div>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setVideoFile(null);
-                      }}
-                    >
-                      <X className="h-4 w-4" />
-                    </Button>
-                  </div>
-                )}
-              </div>
-
-              {uploadError && (
-                <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-md flex items-center">
-                  <X className="h-5 w-5 mr-2 flex-shrink-0" />
-                  <p>{uploadError}</p>
-                </div>
-              )}
-
-              {isUploading && (
-                <div className="space-y-2">
-                  <div className="flex justify-between text-sm">
-                    <span>Uploading...</span>
-                    <span>{uploadProgress}%</span>
-                  </div>
-                  <Progress value={uploadProgress} className="h-2" />
-                </div>
-              )}
-
-              <div className="flex justify-end gap-3">
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    setVideoFile(null);
-                    setUploadError(null);
-                  }}
-                  disabled={!videoFile || isUploading}
-                >
-                  Cancel
-                </Button>
-                <Button
-                  onClick={uploadToCloudinary}
-                  disabled={!videoFile || isUploading}
-                  className="gap-2"
-                >
-                  {isUploading ? (
-                    <>
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                      Uploading...
-                    </>
-                  ) : (
-                    <>
-                      <Upload className="h-4 w-4" />
-                      Upload to Cloudinary
-                    </>
-                  )}
-                </Button>
-              </div>
+        {/* Upload Tab */}
+        <TabsContent value="upload" className="p-6">
+          <div className="space-y-6">
+            <div>
+              <h2 className="text-2xl font-bold mb-2">Upload Video</h2>
+              <p className="text-gray-600 mb-4">
+                Upload a video to start editing with Cloudinary
+              </p>
             </div>
-          </TabsContent>
 
-          {/* Edit Tab */}
-          <TabsContent value="edit" className="p-6">
-            <div className="space-y-6">
-              <div>
-                <h2 className="text-2xl font-bold mb-2">Edit Video</h2>
-                <p className="text-gray-600 mb-4">
-                  Customize your video with Cloudinary's powerful editing tools
-                </p>
-              </div>
+            <div
+              className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center cursor-pointer hover:bg-gray-50 transition-colors"
+              onDragOver={handleDragOver}
+              onDrop={handleDrop}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleFileChange}
+                accept="video/*"
+                className="hidden"
+              />
+              <Upload className="h-12 w-12 mx-auto text-gray-400 mb-4" />
+              <h3 className="text-lg font-medium mb-2">
+                Drag and drop or click to upload
+              </h3>
+              <p className="text-gray-500 mb-4">MP4, MOV, or AVI up to 100MB</p>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {/* Preview */}
-                <Card>
-                  <CardHeader>
-                    <CardTitle>Preview</CardTitle>
-                    <CardDescription>
-                      See your changes in real-time
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <div
-                      className="relative rounded-lg overflow-hidden"
-                      style={borderStyle}
-                    >
-                      <video
-                        ref={videoRef}
-                        src={cachedVideoUrl || undefined}
-                        className="w-full h-auto rounded-sm"
-                        onEnded={handleVideoEnd}
-                        onLoadedMetadata={handleMetadataLoaded}
-                        onError={(e) => console.error("Video error:", e)}
-                        controls={false}
-                        preload="auto"
-                        key={`edit-${cloudinaryPublicId}`}
-                      />
-
-                      {/* Play/Pause overlay */}
-                      <div
-                        className="absolute inset-0 flex items-center justify-center cursor-pointer"
-                        onClick={togglePlayPause}
-                      >
-                        {!isPlaying && (
-                          <div className="h-16 w-16 rounded-full bg-black/50 flex items-center justify-center">
-                            <Play className="h-8 w-8 text-white" />
+              {videoFile && (
+                <div className="mt-4 p-3 bg-gray-100 rounded-md flex items-center justify-between">
+                  <div className="flex items-center">
+                    <div className="relative h-12 w-20 rounded mr-3 bg-gray-200 flex items-center justify-center overflow-hidden">
+                      {videoFile && (
+                        <>
+                          <img
+                            className="h-full w-full object-cover"
+                            src={URL.createObjectURL(videoFile)}
+                            alt="Video thumbnail"
+                            onError={(e) => {
+                              console.error(
+                                "Error loading thumbnail preview:",
+                                e,
+                              );
+                              e.currentTarget.style.display = "none";
+                            }}
+                          />
+                          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                            <Play className="h-4 w-4 text-white" />
                           </div>
-                        )}
-                      </div>
+                        </>
+                      )}
                     </div>
+                    <div className="text-left">
+                      <p className="font-medium truncate max-w-xs">
+                        {videoFile.name}
+                      </p>
+                      <p className="text-xs text-gray-500">
+                        {(videoFile.size / (1024 * 1024)).toFixed(2)} MB
+                      </p>
+                    </div>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setVideoFile(null);
+                    }}
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                </div>
+              )}
+            </div>
 
-                    <div className="mt-4 flex justify-between items-center">
+            {uploadError && (
+              <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-md flex items-center">
+                <X className="h-5 w-5 mr-2 flex-shrink-0" />
+                <p>{uploadError}</p>
+              </div>
+            )}
+
+            {isUploading && (
+              <div className="space-y-2">
+                <div className="flex justify-between text-sm">
+                  <span>
+                    {uploadProgress < 20
+                      ? "Checking for duplicates..."
+                      : uploadProgress < 95
+                        ? "Uploading..."
+                        : "Processing..."}
+                  </span>
+                  <span>{uploadProgress}%</span>
+                </div>
+                <Progress value={uploadProgress} className="h-2" />
+              </div>
+            )}
+
+            <div className="flex justify-end gap-3">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setVideoFile(null);
+                  setUploadError(null);
+                }}
+                disabled={!videoFile || isUploading}
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={uploadToCloudinary}
+                disabled={!videoFile || isUploading}
+                className="gap-2"
+              >
+                {isUploading ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Uploading...
+                  </>
+                ) : (
+                  <>
+                    <Upload className="h-4 w-4" />
+                    Upload to Cloudinary
+                  </>
+                )}
+              </Button>
+            </div>
+          </div>
+        </TabsContent>
+
+        {/* Edit Tab */}
+        <TabsContent value="edit" className="p-6">
+          <div className="space-y-6">
+            <div>
+              <h2 className="text-2xl font-bold mb-2">Edit Video</h2>
+              <p className="text-gray-600 mb-4">
+                Customize your video with Cloudinary's powerful editing tools
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* Preview */}
+              <Card>
+                <CardHeader>
+                  <CardTitle>Preview</CardTitle>
+                  <CardDescription>
+                    See your changes in real-time
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {videoLoadError && (
+                    <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-md flex items-center mb-4">
+                      <AlertCircle className="h-5 w-5 mr-2 flex-shrink-0" />
+                      <p className="text-sm">{videoLoadError}</p>
+                    </div>
+                  )}
+
+                  <div
+                    className="relative rounded-lg overflow-hidden"
+                    style={borderStyle}
+                  >
+                    <video
+                      ref={videoRef}
+                      src={
+                        cloudinaryUrl || // Use the direct cloudinaryUrl first
+                        cachedVideoUrl ||
+                        transformedVideoUrl ||
+                        undefined
+                      }
+                      className="w-full h-auto rounded-sm"
+                      onEnded={handleVideoEnd}
+                      onLoadedMetadata={(e) => {
+                        setVideoLoadError(null);
+                        handleMetadataLoaded(e);
+                      }}
+                      onError={(e) => {
+                        const target = e.target as HTMLVideoElement;
+                        console.error(
+                          "Video error in edit tab:",
+                          e,
+                          target.error,
+                        );
+
+                        // Check for specific format error
+                        const errorMessage =
+                          target.error?.message ||
+                          "Unknown video loading error";
+                        const isFormatError =
+                          errorMessage.includes("format") ||
+                          target.error?.code ===
+                            MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED;
+
+                        setVideoLoadError(
+                          isFormatError
+                            ? "media_element_error:format error - The browser cannot play this video format"
+                            : errorMessage,
+                        );
+                        setVideoLoadAttempts((prev) => prev + 1);
+
+                        // Try to reload with alternative URL if we haven't tried too many times
+                        if (
+                          videoLoadAttempts < 5 &&
+                          (cachedVideoUrl || cloudinaryUrl)
+                        ) {
+                          console.log(
+                            `Attempting to reload video after error (attempt ${videoLoadAttempts + 1}/5)`,
+                          );
+                          setTimeout(() => {
+                            if (videoRef.current) {
+                              const currentUrl =
+                                cachedVideoUrl || cloudinaryUrl;
+
+                              // Try with direct URLs without any transformations
+                              let baseUrlWithoutTransformations;
+                              try {
+                                // Extract just the cloud name and public ID
+                                const urlParts = currentUrl.split("/upload/");
+                                if (urlParts.length >= 2) {
+                                  const cloudName = urlParts[0]
+                                    .split("//")[1]
+                                    .split(".")[0];
+                                  const pathParts = urlParts[1].split("/");
+                                  const publicIdPart =
+                                    pathParts[pathParts.length - 1].split(
+                                      "?",
+                                    )[0];
+                                  // Construct a direct URL without any transformations
+                                  baseUrlWithoutTransformations = `https://res.cloudinary.com/${cloudName}/video/upload/${publicIdPart}`;
+                                } else {
+                                  baseUrlWithoutTransformations =
+                                    currentUrl.split("?")[0];
+                                }
+                              } catch (error) {
+                                console.error(
+                                  "Error extracting base URL:",
+                                  error,
+                                );
+                                baseUrlWithoutTransformations =
+                                  currentUrl.split("?")[0];
+                              }
+                              console.log(
+                                "Base URL without transformations:",
+                                baseUrlWithoutTransformations,
+                              );
+
+                              const formatUrls = [
+                                // Try direct URL first
+                                `${baseUrlWithoutTransformations}`,
+                                // Then try with minimal parameters
+                                `${baseUrlWithoutTransformations}?_t=${stableTimestampRef.current}`,
+                                `${baseUrlWithoutTransformations}?f_mp4`,
+                                `${baseUrlWithoutTransformations}?f_auto`,
+                                // Then try with more specific parameters
+                                `${baseUrlWithoutTransformations}?f_mp4,q_auto:low`,
+                              ];
+
+                              const retryUrl =
+                                formatUrls[
+                                  videoLoadAttempts % formatUrls.length
+                                ];
+
+                              console.log(
+                                "Reloading with alternative URL:",
+                                retryUrl,
+                              );
+                              videoRef.current.src = retryUrl;
+                              setCachedVideoUrl(retryUrl);
+                              videoRef.current.load();
+                            }
+                          }, 1000);
+                        } else if (videoLoadAttempts >= 5) {
+                          setDebugMode(true);
+                        }
+                      }}
+                      controls={false}
+                      preload="metadata"
+                      crossOrigin="anonymous"
+                      key={`edit-${cloudinaryPublicId}`}
+                      // Add additional attributes to help with format compatibility
+                      playsInline
+                      muted
+                      type="video/mp4"
+                    />
+
+                    {/* Play/Pause overlay */}
+                    <div
+                      className="absolute inset-0 flex items-center justify-center cursor-pointer"
+                      onClick={togglePlayPause}
+                    >
+                      {!isPlaying && (
+                        <div className="h-16 w-16 rounded-full bg-black/50 flex items-center justify-center">
+                          <Play className="h-8 w-8 text-white" />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {debugMode && (
+                    <CloudinaryDebugPanel
+                      videoUrl={cachedVideoUrl || cloudinaryUrl}
+                      publicId={cloudinaryPublicId}
+                      onRetry={() => {
+                        if (
+                          videoRef.current &&
+                          (cachedVideoUrl || cloudinaryUrl)
+                        ) {
+                          // Try with direct URL without any transformations
+                          let retryUrl;
+                          try {
+                            // Extract just the cloud name and public ID
+                            const urlParts = (
+                              cachedVideoUrl || cloudinaryUrl
+                            ).split("/upload/");
+                            if (urlParts.length >= 2) {
+                              const cloudName = urlParts[0]
+                                .split("//")[1]
+                                .split(".")[0];
+                              const pathParts = urlParts[1].split("/");
+                              const publicIdPart =
+                                pathParts[pathParts.length - 1].split("?")[0];
+                              // Construct a direct URL without any transformations
+                              retryUrl = `https://res.cloudinary.com/${cloudName}/video/upload/${publicIdPart}?_retry=${stableTimestampRef.current}`;
+                            } else {
+                              retryUrl = `${(cachedVideoUrl || cloudinaryUrl).split("?")[0]}?_retry=${stableTimestampRef.current}`;
+                            }
+                          } catch (error) {
+                            console.error("Error creating retry URL:", error);
+                            retryUrl = `${(cachedVideoUrl || cloudinaryUrl).split("?")[0]}?_retry=${stableTimestampRef.current}`;
+                          }
+                          console.log("Manual retry with URL:", retryUrl);
+                          videoRef.current.src = retryUrl;
+                          setCachedVideoUrl(retryUrl);
+                          videoRef.current.load();
+                          setVideoLoadAttempts(0);
+                        }
+                      }}
+                    />
+                  )}
+
+                  <div className="mt-4 flex justify-between items-center">
+                    <div className="flex gap-2">
                       <Button
                         variant="outline"
                         size="sm"
@@ -759,662 +1139,707 @@ function CloudinaryVideoEditor({
                         variant="outline"
                         size="sm"
                         onClick={() =>
-                          window.open(cachedVideoUrl || "", "_blank")
+                          window.open(
+                            transformedVideoUrl ||
+                              cachedVideoUrl ||
+                              cloudinaryUrl ||
+                              "",
+                            "_blank",
+                          )
                         }
                         className="flex items-center gap-2"
                         disabled={!cachedVideoUrl}
                       >
                         <Download className="h-4 w-4" /> Download
                       </Button>
+
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setDebugMode(!debugMode)}
+                        className="flex items-center gap-1"
+                      >
+                        <AlertCircle className="h-4 w-4" />
+                        {debugMode ? "Hide Debug" : "Debug"}
+                      </Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* Editing Tools */}
+              <div className="space-y-6">
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <Image className="h-5 w-5" /> Border & Size
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="space-y-2">
+                      <Label>
+                        Border Width ({transformations.border.width}px)
+                      </Label>
+                      <Slider
+                        min={0}
+                        max={20}
+                        step={1}
+                        value={[transformations.border.width]}
+                        onValueChange={(value) =>
+                          setTransformations((prev) => ({
+                            ...prev,
+                            border: { ...prev.border, width: value[0] },
+                          }))
+                        }
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label>Border Color</Label>
+                      <div className="flex gap-2">
+                        <Input
+                          type="color"
+                          value={transformations.border.color}
+                          onChange={(e) =>
+                            setTransformations((prev) => ({
+                              ...prev,
+                              border: {
+                                ...prev.border,
+                                color: e.target.value,
+                              },
+                            }))
+                          }
+                          className="w-12 h-10 p-1"
+                        />
+                        <Input
+                          type="text"
+                          value={transformations.border.color}
+                          onChange={(e) =>
+                            setTransformations((prev) => ({
+                              ...prev,
+                              border: {
+                                ...prev.border,
+                                color: e.target.value,
+                              },
+                            }))
+                          }
+                          className="flex-1"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label>
+                        Border Radius ({transformations.border.radius}px)
+                      </Label>
+                      <Slider
+                        min={0}
+                        max={50}
+                        step={1}
+                        value={[transformations.border.radius]}
+                        onValueChange={(value) =>
+                          setTransformations((prev) => ({
+                            ...prev,
+                            border: { ...prev.border, radius: value[0] },
+                          }))
+                        }
+                      />
+                    </div>
+
+                    <Separator className="my-4" />
+
+                    <div className="space-y-2">
+                      <Label>Resize Mode</Label>
+                      <Select
+                        value={transformations.resize.mode}
+                        onValueChange={(value: "fill" | "scale" | "crop") =>
+                          setTransformations((prev) => ({
+                            ...prev,
+                            resize: { ...prev.resize, mode: value },
+                          }))
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select resize mode" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="fill">Fill</SelectItem>
+                          <SelectItem value="scale">Scale</SelectItem>
+                          <SelectItem value="crop">Crop</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <Label>Width (px)</Label>
+                        <Input
+                          type="number"
+                          value={transformations.resize.width}
+                          onChange={(e) =>
+                            setTransformations((prev) => ({
+                              ...prev,
+                              resize: {
+                                ...prev.resize,
+                                width: parseInt(e.target.value) || 1920,
+                              },
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label>Height (px)</Label>
+                        <Input
+                          type="number"
+                          value={transformations.resize.height}
+                          onChange={(e) =>
+                            setTransformations((prev) => ({
+                              ...prev,
+                              resize: {
+                                ...prev.resize,
+                                height: parseInt(e.target.value) || 1080,
+                              },
+                            }))
+                          }
+                        />
+                      </div>
                     </div>
                   </CardContent>
                 </Card>
 
-                {/* Editing Tools */}
-                <div className="space-y-6">
-                  <Card>
-                    <CardHeader>
-                      <CardTitle className="flex items-center gap-2">
-                        <Image className="h-5 w-5" /> Border & Size
-                      </CardTitle>
-                    </CardHeader>
-                    <CardContent className="space-y-4">
-                      <div className="space-y-2">
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <Sliders className="h-5 w-5" /> Adjustments
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="space-y-2">
+                      <div className="flex justify-between">
                         <Label>
-                          Border Width ({transformations.border.width}px)
+                          Brightness ({transformations.adjust.brightness})
                         </Label>
-                        <Slider
-                          min={0}
-                          max={20}
-                          step={1}
-                          value={[transformations.border.width]}
-                          onValueChange={(value) =>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 text-xs"
+                          onClick={() =>
                             setTransformations((prev) => ({
                               ...prev,
-                              border: { ...prev.border, width: value[0] },
+                              adjust: { ...prev.adjust, brightness: 0 },
                             }))
                           }
-                        />
+                        >
+                          Reset
+                        </Button>
                       </div>
+                      <Slider
+                        min={-100}
+                        max={100}
+                        step={5}
+                        value={[transformations.adjust.brightness]}
+                        onValueChange={(value) =>
+                          setTransformations((prev) => ({
+                            ...prev,
+                            adjust: { ...prev.adjust, brightness: value[0] },
+                          }))
+                        }
+                      />
+                    </div>
 
+                    <div className="space-y-2">
+                      <div className="flex justify-between">
+                        <Label>
+                          Contrast ({transformations.adjust.contrast})
+                        </Label>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 text-xs"
+                          onClick={() =>
+                            setTransformations((prev) => ({
+                              ...prev,
+                              adjust: { ...prev.adjust, contrast: 0 },
+                            }))
+                          }
+                        >
+                          Reset
+                        </Button>
+                      </div>
+                      <Slider
+                        min={-100}
+                        max={100}
+                        step={5}
+                        value={[transformations.adjust.contrast]}
+                        onValueChange={(value) =>
+                          setTransformations((prev) => ({
+                            ...prev,
+                            adjust: { ...prev.adjust, contrast: value[0] },
+                          }))
+                        }
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex justify-between">
+                        <Label>
+                          Saturation ({transformations.adjust.saturation})
+                        </Label>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 text-xs"
+                          onClick={() =>
+                            setTransformations((prev) => ({
+                              ...prev,
+                              adjust: { ...prev.adjust, saturation: 0 },
+                            }))
+                          }
+                        >
+                          Reset
+                        </Button>
+                      </div>
+                      <Slider
+                        min={-100}
+                        max={100}
+                        step={5}
+                        value={[transformations.adjust.saturation]}
+                        onValueChange={(value) =>
+                          setTransformations((prev) => ({
+                            ...prev,
+                            adjust: { ...prev.adjust, saturation: value[0] },
+                          }))
+                        }
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex justify-between">
+                        <Label>Sepia ({transformations.adjust.sepia})</Label>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 text-xs"
+                          onClick={() =>
+                            setTransformations((prev) => ({
+                              ...prev,
+                              adjust: { ...prev.adjust, sepia: 0 },
+                            }))
+                          }
+                        >
+                          Reset
+                        </Button>
+                      </div>
+                      <Slider
+                        min={0}
+                        max={100}
+                        step={5}
+                        value={[transformations.adjust.sepia]}
+                        onValueChange={(value) =>
+                          setTransformations((prev) => ({
+                            ...prev,
+                            adjust: { ...prev.adjust, sepia: value[0] },
+                          }))
+                        }
+                      />
+                    </div>
+
+                    <div className="flex items-center space-x-2">
+                      <Switch
+                        id="grayscale"
+                        checked={transformations.adjust.grayscale}
+                        onCheckedChange={(checked) =>
+                          setTransformations((prev) => ({
+                            ...prev,
+                            adjust: { ...prev.adjust, grayscale: checked },
+                          }))
+                        }
+                      />
+                      <Label htmlFor="grayscale">Grayscale</Label>
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader>
+                    <div className="flex items-center justify-between">
+                      <CardTitle className="flex items-center gap-2">
+                        <Type className="h-5 w-5" /> Text Overlay
+                      </CardTitle>
+                      <Switch
+                        checked={transformations.text.enabled}
+                        onCheckedChange={(checked) =>
+                          setTransformations((prev) => ({
+                            ...prev,
+                            text: { ...prev.text, enabled: checked },
+                          }))
+                        }
+                      />
+                    </div>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="space-y-2">
+                      <Label>Text Content</Label>
+                      <Input
+                        value={transformations.text.content}
+                        onChange={(e) =>
+                          setTransformations((prev) => ({
+                            ...prev,
+                            text: { ...prev.text, content: e.target.value },
+                          }))
+                        }
+                        disabled={!transformations.text.enabled}
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label>Position</Label>
+                      <Select
+                        value={transformations.text.position}
+                        onValueChange={(value: any) =>
+                          setTransformations((prev) => ({
+                            ...prev,
+                            text: { ...prev.text, position: value },
+                          }))
+                        }
+                        disabled={!transformations.text.enabled}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select position" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="north">Top</SelectItem>
+                          <SelectItem value="south">Bottom</SelectItem>
+                          <SelectItem value="east">Right</SelectItem>
+                          <SelectItem value="west">Left</SelectItem>
+                          <SelectItem value="center">Center</SelectItem>
+                          <SelectItem value="north_east">Top Right</SelectItem>
+                          <SelectItem value="north_west">Top Left</SelectItem>
+                          <SelectItem value="south_east">
+                            Bottom Right
+                          </SelectItem>
+                          <SelectItem value="south_west">
+                            Bottom Left
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
                       <div className="space-y-2">
-                        <Label>Border Color</Label>
+                        <Label>Color</Label>
                         <div className="flex gap-2">
                           <Input
                             type="color"
-                            value={transformations.border.color}
+                            value={transformations.text.color}
                             onChange={(e) =>
                               setTransformations((prev) => ({
                                 ...prev,
-                                border: {
-                                  ...prev.border,
-                                  color: e.target.value,
-                                },
+                                text: { ...prev.text, color: e.target.value },
                               }))
                             }
                             className="w-12 h-10 p-1"
-                          />
-                          <Input
-                            type="text"
-                            value={transformations.border.color}
-                            onChange={(e) =>
-                              setTransformations((prev) => ({
-                                ...prev,
-                                border: {
-                                  ...prev.border,
-                                  color: e.target.value,
-                                },
-                              }))
-                            }
-                            className="flex-1"
-                          />
-                        </div>
-                      </div>
-
-                      <div className="space-y-2">
-                        <Label>
-                          Border Radius ({transformations.border.radius}px)
-                        </Label>
-                        <Slider
-                          min={0}
-                          max={50}
-                          step={1}
-                          value={[transformations.border.radius]}
-                          onValueChange={(value) =>
-                            setTransformations((prev) => ({
-                              ...prev,
-                              border: { ...prev.border, radius: value[0] },
-                            }))
-                          }
-                        />
-                      </div>
-
-                      <Separator className="my-4" />
-
-                      <div className="space-y-2">
-                        <Label>Resize Mode</Label>
-                        <Select
-                          value={transformations.resize.mode}
-                          onValueChange={(value: "fill" | "scale" | "crop") =>
-                            setTransformations((prev) => ({
-                              ...prev,
-                              resize: { ...prev.resize, mode: value },
-                            }))
-                          }
-                        >
-                          <SelectTrigger>
-                            <SelectValue placeholder="Select resize mode" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="fill">Fill</SelectItem>
-                            <SelectItem value="scale">Scale</SelectItem>
-                            <SelectItem value="crop">Crop</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-4">
-                        <div className="space-y-2">
-                          <Label>Width (px)</Label>
-                          <Input
-                            type="number"
-                            value={transformations.resize.width}
-                            onChange={(e) =>
-                              setTransformations((prev) => ({
-                                ...prev,
-                                resize: {
-                                  ...prev.resize,
-                                  width: parseInt(e.target.value) || 1920,
-                                },
-                              }))
-                            }
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label>Height (px)</Label>
-                          <Input
-                            type="number"
-                            value={transformations.resize.height}
-                            onChange={(e) =>
-                              setTransformations((prev) => ({
-                                ...prev,
-                                resize: {
-                                  ...prev.resize,
-                                  height: parseInt(e.target.value) || 1080,
-                                },
-                              }))
-                            }
-                          />
-                        </div>
-                      </div>
-                    </CardContent>
-                  </Card>
-
-                  <Card>
-                    <CardHeader>
-                      <CardTitle className="flex items-center gap-2">
-                        <Sliders className="h-5 w-5" /> Adjustments
-                      </CardTitle>
-                    </CardHeader>
-                    <CardContent className="space-y-4">
-                      <div className="space-y-2">
-                        <div className="flex justify-between">
-                          <Label>
-                            Brightness ({transformations.adjust.brightness})
-                          </Label>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-6 text-xs"
-                            onClick={() =>
-                              setTransformations((prev) => ({
-                                ...prev,
-                                adjust: { ...prev.adjust, brightness: 0 },
-                              }))
-                            }
-                          >
-                            Reset
-                          </Button>
-                        </div>
-                        <Slider
-                          min={-100}
-                          max={100}
-                          step={5}
-                          value={[transformations.adjust.brightness]}
-                          onValueChange={(value) =>
-                            setTransformations((prev) => ({
-                              ...prev,
-                              adjust: { ...prev.adjust, brightness: value[0] },
-                            }))
-                          }
-                        />
-                      </div>
-
-                      <div className="space-y-2">
-                        <div className="flex justify-between">
-                          <Label>
-                            Contrast ({transformations.adjust.contrast})
-                          </Label>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-6 text-xs"
-                            onClick={() =>
-                              setTransformations((prev) => ({
-                                ...prev,
-                                adjust: { ...prev.adjust, contrast: 0 },
-                              }))
-                            }
-                          >
-                            Reset
-                          </Button>
-                        </div>
-                        <Slider
-                          min={-100}
-                          max={100}
-                          step={5}
-                          value={[transformations.adjust.contrast]}
-                          onValueChange={(value) =>
-                            setTransformations((prev) => ({
-                              ...prev,
-                              adjust: { ...prev.adjust, contrast: value[0] },
-                            }))
-                          }
-                        />
-                      </div>
-
-                      <div className="space-y-2">
-                        <div className="flex justify-between">
-                          <Label>
-                            Saturation ({transformations.adjust.saturation})
-                          </Label>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-6 text-xs"
-                            onClick={() =>
-                              setTransformations((prev) => ({
-                                ...prev,
-                                adjust: { ...prev.adjust, saturation: 0 },
-                              }))
-                            }
-                          >
-                            Reset
-                          </Button>
-                        </div>
-                        <Slider
-                          min={-100}
-                          max={100}
-                          step={5}
-                          value={[transformations.adjust.saturation]}
-                          onValueChange={(value) =>
-                            setTransformations((prev) => ({
-                              ...prev,
-                              adjust: { ...prev.adjust, saturation: value[0] },
-                            }))
-                          }
-                        />
-                      </div>
-
-                      <div className="space-y-2">
-                        <div className="flex justify-between">
-                          <Label>Sepia ({transformations.adjust.sepia})</Label>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-6 text-xs"
-                            onClick={() =>
-                              setTransformations((prev) => ({
-                                ...prev,
-                                adjust: { ...prev.adjust, sepia: 0 },
-                              }))
-                            }
-                          >
-                            Reset
-                          </Button>
-                        </div>
-                        <Slider
-                          min={0}
-                          max={100}
-                          step={5}
-                          value={[transformations.adjust.sepia]}
-                          onValueChange={(value) =>
-                            setTransformations((prev) => ({
-                              ...prev,
-                              adjust: { ...prev.adjust, sepia: value[0] },
-                            }))
-                          }
-                        />
-                      </div>
-
-                      <div className="flex items-center space-x-2">
-                        <Switch
-                          id="grayscale"
-                          checked={transformations.adjust.grayscale}
-                          onCheckedChange={(checked) =>
-                            setTransformations((prev) => ({
-                              ...prev,
-                              adjust: { ...prev.adjust, grayscale: checked },
-                            }))
-                          }
-                        />
-                        <Label htmlFor="grayscale">Grayscale</Label>
-                      </div>
-                    </CardContent>
-                  </Card>
-
-                  <Card>
-                    <CardHeader>
-                      <div className="flex items-center justify-between">
-                        <CardTitle className="flex items-center gap-2">
-                          <Type className="h-5 w-5" /> Text Overlay
-                        </CardTitle>
-                        <Switch
-                          checked={transformations.text.enabled}
-                          onCheckedChange={(checked) =>
-                            setTransformations((prev) => ({
-                              ...prev,
-                              text: { ...prev.text, enabled: checked },
-                            }))
-                          }
-                        />
-                      </div>
-                    </CardHeader>
-                    <CardContent className="space-y-4">
-                      <div className="space-y-2">
-                        <Label>Text Content</Label>
-                        <Input
-                          value={transformations.text.content}
-                          onChange={(e) =>
-                            setTransformations((prev) => ({
-                              ...prev,
-                              text: { ...prev.text, content: e.target.value },
-                            }))
-                          }
-                          disabled={!transformations.text.enabled}
-                        />
-                      </div>
-
-                      <div className="space-y-2">
-                        <Label>Position</Label>
-                        <Select
-                          value={transformations.text.position}
-                          onValueChange={(value: any) =>
-                            setTransformations((prev) => ({
-                              ...prev,
-                              text: { ...prev.text, position: value },
-                            }))
-                          }
-                          disabled={!transformations.text.enabled}
-                        >
-                          <SelectTrigger>
-                            <SelectValue placeholder="Select position" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="north">Top</SelectItem>
-                            <SelectItem value="south">Bottom</SelectItem>
-                            <SelectItem value="east">Right</SelectItem>
-                            <SelectItem value="west">Left</SelectItem>
-                            <SelectItem value="center">Center</SelectItem>
-                            <SelectItem value="north_east">
-                              Top Right
-                            </SelectItem>
-                            <SelectItem value="north_west">Top Left</SelectItem>
-                            <SelectItem value="south_east">
-                              Bottom Right
-                            </SelectItem>
-                            <SelectItem value="south_west">
-                              Bottom Left
-                            </SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-4">
-                        <div className="space-y-2">
-                          <Label>Color</Label>
-                          <div className="flex gap-2">
-                            <Input
-                              type="color"
-                              value={transformations.text.color}
-                              onChange={(e) =>
-                                setTransformations((prev) => ({
-                                  ...prev,
-                                  text: { ...prev.text, color: e.target.value },
-                                }))
-                              }
-                              className="w-12 h-10 p-1"
-                              disabled={!transformations.text.enabled}
-                            />
-                          </div>
-                        </div>
-                        <div className="space-y-2">
-                          <Label>Size (px)</Label>
-                          <Input
-                            type="number"
-                            value={transformations.text.size}
-                            onChange={(e) =>
-                              setTransformations((prev) => ({
-                                ...prev,
-                                text: {
-                                  ...prev.text,
-                                  size: parseInt(e.target.value) || 40,
-                                },
-                              }))
-                            }
                             disabled={!transformations.text.enabled}
                           />
                         </div>
                       </div>
-
                       <div className="space-y-2">
-                        <Label>Font Family</Label>
-                        <Select
-                          value={transformations.text.fontFamily}
-                          onValueChange={(value) =>
+                        <Label>Size (px)</Label>
+                        <Input
+                          type="number"
+                          value={transformations.text.size}
+                          onChange={(e) =>
                             setTransformations((prev) => ({
                               ...prev,
-                              text: { ...prev.text, fontFamily: value },
+                              text: {
+                                ...prev.text,
+                                size: parseInt(e.target.value) || 40,
+                              },
                             }))
                           }
                           disabled={!transformations.text.enabled}
-                        >
-                          <SelectTrigger>
-                            <SelectValue placeholder="Select font" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="Arial">Arial</SelectItem>
-                            <SelectItem value="Verdana">Verdana</SelectItem>
-                            <SelectItem value="Helvetica">Helvetica</SelectItem>
-                            <SelectItem value="Times New Roman">
-                              Times New Roman
-                            </SelectItem>
-                            <SelectItem value="Courier New">
-                              Courier New
-                            </SelectItem>
-                          </SelectContent>
-                        </Select>
+                        />
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label>Font Family</Label>
+                      <Select
+                        value={transformations.text.fontFamily}
+                        onValueChange={(value) =>
+                          setTransformations((prev) => ({
+                            ...prev,
+                            text: { ...prev.text, fontFamily: value },
+                          }))
+                        }
+                        disabled={!transformations.text.enabled}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select font" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="Arial">Arial</SelectItem>
+                          <SelectItem value="Verdana">Verdana</SelectItem>
+                          <SelectItem value="Helvetica">Helvetica</SelectItem>
+                          <SelectItem value="Times New Roman">
+                            Times New Roman
+                          </SelectItem>
+                          <SelectItem value="Courier New">
+                            Courier New
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </CardContent>
+                </Card>
+
+                {videoDuration > 0 && (
+                  <Card>
+                    <CardHeader>
+                      <div className="flex items-center justify-between">
+                        <CardTitle className="flex items-center gap-2">
+                          <RefreshCw className="h-5 w-5" /> Trim Video
+                        </CardTitle>
+                        <Switch
+                          checked={transformations.trim.enabled}
+                          onCheckedChange={(checked) =>
+                            setTransformations((prev) => ({
+                              ...prev,
+                              trim: { ...prev.trim, enabled: checked },
+                            }))
+                          }
+                        />
+                      </div>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      <div className="space-y-2">
+                        <div className="flex justify-between">
+                          <Label>
+                            Start Time:{" "}
+                            {transformations.trim.startSeconds.toFixed(1)}s
+                          </Label>
+                          <Label>
+                            End Time:{" "}
+                            {transformations.trim.endSeconds.toFixed(1)}s
+                          </Label>
+                        </div>
+                        <div className="pt-6 pb-2">
+                          <Slider
+                            min={0}
+                            max={videoDuration}
+                            step={0.1}
+                            value={[
+                              transformations.trim.startSeconds,
+                              transformations.trim.endSeconds,
+                            ]}
+                            onValueChange={([start, end]) =>
+                              setTransformations((prev) => ({
+                                ...prev,
+                                trim: {
+                                  ...prev.trim,
+                                  startSeconds: start,
+                                  endSeconds: end,
+                                },
+                              }))
+                            }
+                            disabled={!transformations.trim.enabled}
+                          />
+                        </div>
+                        <div className="text-xs text-gray-500">
+                          Duration:{" "}
+                          {(
+                            transformations.trim.endSeconds -
+                            transformations.trim.startSeconds
+                          ).toFixed(1)}
+                          s of {videoDuration.toFixed(1)}s
+                        </div>
                       </div>
                     </CardContent>
                   </Card>
+                )}
+              </div>
+            </div>
 
-                  {videoDuration > 0 && (
-                    <Card>
-                      <CardHeader>
-                        <div className="flex items-center justify-between">
-                          <CardTitle className="flex items-center gap-2">
-                            <RefreshCw className="h-5 w-5" /> Trim Video
-                          </CardTitle>
-                          <Switch
-                            checked={transformations.trim.enabled}
-                            onCheckedChange={(checked) =>
-                              setTransformations((prev) => ({
-                                ...prev,
-                                trim: { ...prev.trim, enabled: checked },
-                              }))
-                            }
-                          />
-                        </div>
-                      </CardHeader>
-                      <CardContent className="space-y-4">
-                        <div className="space-y-2">
-                          <div className="flex justify-between">
-                            <Label>
-                              Start Time:{" "}
-                              {transformations.trim.startSeconds.toFixed(1)}s
-                            </Label>
-                            <Label>
-                              End Time:{" "}
-                              {transformations.trim.endSeconds.toFixed(1)}s
-                            </Label>
-                          </div>
-                          <div className="pt-6 pb-2">
-                            <Slider
-                              min={0}
-                              max={videoDuration}
-                              step={0.1}
-                              value={[
-                                transformations.trim.startSeconds,
-                                transformations.trim.endSeconds,
-                              ]}
-                              onValueChange={([start, end]) =>
-                                setTransformations((prev) => ({
-                                  ...prev,
-                                  trim: {
-                                    ...prev.trim,
-                                    startSeconds: start,
-                                    endSeconds: end,
-                                  },
-                                }))
-                              }
-                              disabled={!transformations.trim.enabled}
-                            />
-                          </div>
-                          <div className="text-xs text-gray-500">
-                            Duration:{" "}
-                            {(
-                              transformations.trim.endSeconds -
-                              transformations.trim.startSeconds
-                            ).toFixed(1)}
-                            s of {videoDuration.toFixed(1)}s
-                          </div>
-                        </div>
-                      </CardContent>
-                    </Card>
+            <div className="flex justify-end gap-3">
+              <Button variant="outline" onClick={() => setActiveTab("upload")}>
+                Back to Upload
+              </Button>
+              <Button onClick={() => setActiveTab("preview")} className="gap-2">
+                <Check className="h-4 w-4" />
+                Preview Result
+              </Button>
+            </div>
+          </div>
+        </TabsContent>
+
+        {/* Preview Tab */}
+        <TabsContent value="preview" className="p-6">
+          <div className="space-y-6">
+            <div>
+              <h2 className="text-2xl font-bold mb-2">Final Preview</h2>
+              <p className="text-gray-600 mb-4">
+                Your edited video is ready to download
+              </p>
+            </div>
+
+            <div className="max-w-3xl mx-auto">
+              <div
+                className="relative rounded-lg overflow-hidden"
+                style={borderStyle}
+              >
+                <video
+                  src={
+                    cloudinaryUrl || // Use the direct cloudinaryUrl first
+                    cachedVideoUrl ||
+                    transformedVideoUrl ||
+                    undefined
+                  }
+                  className="w-full h-auto rounded-sm"
+                  controls
+                  preload="metadata"
+                  crossOrigin="anonymous"
+                  onError={(e) => {
+                    const target = e.target as HTMLVideoElement;
+                    console.error("Preview video error:", e, target.error);
+                    setVideoLoadError(
+                      target.error?.message || "Unknown video loading error",
+                    );
+                    setDebugMode(true);
+
+                    // Try to reload with a different URL format
+                    setTimeout(() => {
+                      const currentSrc = target.src;
+                      if (currentSrc) {
+                        // Try with direct URL without any transformations
+                        let retryUrl;
+                        try {
+                          // Extract just the cloud name and public ID
+                          const urlParts = currentSrc.split("/upload/");
+                          if (urlParts.length >= 2) {
+                            const cloudName = urlParts[0]
+                              .split("//")[1]
+                              .split(".")[0];
+                            const pathParts = urlParts[1].split("/");
+                            const publicIdPart =
+                              pathParts[pathParts.length - 1].split("?")[0];
+                            // Construct a direct URL without any transformations
+                            retryUrl = `https://res.cloudinary.com/${cloudName}/video/upload/${publicIdPart}?_retry=${stableTimestampRef.current}`;
+                          } else {
+                            retryUrl = `${currentSrc.split("?")[0]}?_retry=${stableTimestampRef.current}`;
+                          }
+                        } catch (error) {
+                          console.error("Error creating retry URL:", error);
+                          retryUrl = `${currentSrc.split("?")[0]}?_retry=${stableTimestampRef.current}`;
+                        }
+                        console.log(
+                          "Attempting to reload preview video with URL:",
+                          retryUrl,
+                        );
+                        target.src = retryUrl;
+                        target.load();
+                      }
+                    }, 1000);
+                  }}
+                  onLoadStart={() => {}}
+                  key={`preview-${cloudinaryPublicId}`}
+                />
+              </div>
+
+              <div className="mt-8 space-y-4">
+                <h3 className="text-lg font-semibold">
+                  Applied Transformations
+                </h3>
+                <div className="flex flex-wrap gap-2">
+                  {transformations.border.width > 0 && (
+                    <Badge variant="secondary">
+                      Border: {transformations.border.width}px
+                    </Badge>
+                  )}
+                  {transformations.border.radius > 0 && (
+                    <Badge variant="secondary">
+                      Rounded: {transformations.border.radius}px
+                    </Badge>
+                  )}
+                  <Badge variant="secondary">
+                    Size: {transformations.resize.width}×
+                    {transformations.resize.height}
+                  </Badge>
+                  {transformations.adjust.brightness !== 0 && (
+                    <Badge variant="secondary">
+                      Brightness: {transformations.adjust.brightness}
+                    </Badge>
+                  )}
+                  {transformations.adjust.contrast !== 0 && (
+                    <Badge variant="secondary">
+                      Contrast: {transformations.adjust.contrast}
+                    </Badge>
+                  )}
+                  {transformations.adjust.saturation !== 0 && (
+                    <Badge variant="secondary">
+                      Saturation: {transformations.adjust.saturation}
+                    </Badge>
+                  )}
+                  {transformations.adjust.sepia > 0 && (
+                    <Badge variant="secondary">
+                      Sepia: {transformations.adjust.sepia}%
+                    </Badge>
+                  )}
+                  {transformations.adjust.grayscale && (
+                    <Badge variant="secondary">Grayscale</Badge>
+                  )}
+                  {transformations.text.enabled && (
+                    <Badge variant="secondary">Text Overlay</Badge>
+                  )}
+                  {transformations.trim.enabled && (
+                    <Badge variant="secondary">
+                      Trimmed: {transformations.trim.startSeconds.toFixed(1)}s -{" "}
+                      {transformations.trim.endSeconds.toFixed(1)}s
+                    </Badge>
                   )}
                 </div>
               </div>
 
-              <div className="flex justify-end gap-3">
+              <div className="mt-8 flex justify-center">
                 <Button
-                  variant="outline"
-                  onClick={() => setActiveTab("upload")}
-                >
-                  Back to Upload
-                </Button>
-                <Button
-                  onClick={() => setActiveTab("preview")}
-                  className="gap-2"
-                >
-                  <Check className="h-4 w-4" />
-                  Preview Result
-                </Button>
-              </div>
-            </div>
-          </TabsContent>
-
-          {/* Preview Tab */}
-          <TabsContent value="preview" className="p-6">
-            <div className="space-y-6">
-              <div>
-                <h2 className="text-2xl font-bold mb-2">Final Preview</h2>
-                <p className="text-gray-600 mb-4">
-                  Your edited video is ready to download
-                </p>
-              </div>
-
-              <div className="max-w-3xl mx-auto">
-                <div
-                  className="relative rounded-lg overflow-hidden"
-                  style={borderStyle}
-                >
-                  <video
-                    src={cachedVideoUrl || undefined}
-                    className="w-full h-auto rounded-sm"
-                    controls
-                    preload="metadata"
-                    key={cachedVideoUrl} // Force video element to reload when URL changes
-                  />
-                </div>
-
-                <div className="mt-8 space-y-4">
-                  <h3 className="text-lg font-semibold">
-                    Applied Transformations
-                  </h3>
-                  <div className="flex flex-wrap gap-2">
-                    {transformations.border.width > 0 && (
-                      <Badge variant="secondary">
-                        Border: {transformations.border.width}px
-                      </Badge>
-                    )}
-                    {transformations.border.radius > 0 && (
-                      <Badge variant="secondary">
-                        Rounded: {transformations.border.radius}px
-                      </Badge>
-                    )}
-                    <Badge variant="secondary">
-                      Size: {transformations.resize.width}×
-                      {transformations.resize.height}
-                    </Badge>
-                    {transformations.adjust.brightness !== 0 && (
-                      <Badge variant="secondary">
-                        Brightness: {transformations.adjust.brightness}
-                      </Badge>
-                    )}
-                    {transformations.adjust.contrast !== 0 && (
-                      <Badge variant="secondary">
-                        Contrast: {transformations.adjust.contrast}
-                      </Badge>
-                    )}
-                    {transformations.adjust.saturation !== 0 && (
-                      <Badge variant="secondary">
-                        Saturation: {transformations.adjust.saturation}
-                      </Badge>
-                    )}
-                    {transformations.adjust.sepia > 0 && (
-                      <Badge variant="secondary">
-                        Sepia: {transformations.adjust.sepia}%
-                      </Badge>
-                    )}
-                    {transformations.adjust.grayscale && (
-                      <Badge variant="secondary">Grayscale</Badge>
-                    )}
-                    {transformations.text.enabled && (
-                      <Badge variant="secondary">Text Overlay</Badge>
-                    )}
-                    {transformations.trim.enabled && (
-                      <Badge variant="secondary">
-                        Trimmed: {transformations.trim.startSeconds.toFixed(1)}s
-                        - {transformations.trim.endSeconds.toFixed(1)}s
-                      </Badge>
-                    )}
-                  </div>
-                </div>
-
-                <div className="mt-8 flex justify-center">
-                  <Button
-                    size="lg"
-                    onClick={() => window.open(cachedVideoUrl || "", "_blank")}
-                    className="gap-2"
-                    disabled={!cachedVideoUrl}
-                  >
-                    <Download className="h-5 w-5" />
-                    Download Edited Video
-                  </Button>
-                </div>
-              </div>
-
-              <div className="flex justify-between">
-                <Button variant="outline" onClick={() => setActiveTab("edit")}>
-                  Back to Edit
-                </Button>
-                <Button
-                  variant="outline"
+                  size="lg"
                   onClick={() => {
-                    setVideoFile(null);
-                    setCloudinaryUrl(null);
-                    setCloudinaryPublicId(null);
-                    setActiveTab("upload");
+                    const url =
+                      transformedVideoUrl ||
+                      cachedVideoUrl ||
+                      cloudinaryUrl ||
+                      "";
+                    console.log("Opening download URL:", url);
+                    window.open(url, "_blank");
                   }}
+                  className="gap-2"
+                  disabled={!transformedVideoUrl && !cachedVideoUrl}
                 >
-                  Start New Project
+                  <Download className="h-5 w-5" />
+                  Download Edited Video
                 </Button>
               </div>
             </div>
-          </TabsContent>
-        </Tabs>
-      </div>
-    ),
-    [
-      activeTab,
-      videoFile,
-      isUploading,
-      uploadProgress,
-      uploadError,
-      cloudinaryUrl,
-      cachedVideoUrl,
-      isPlaying,
-      borderStyle,
-      transformations,
-      videoDuration,
-      handleDragOver,
-      handleDrop,
-      handleFileChange,
-      uploadToCloudinary,
-      togglePlayPause,
-      handleVideoEnd,
-      handleMetadataLoaded,
-    ],
+
+            <div className="flex justify-between">
+              <Button variant="outline" onClick={() => setActiveTab("edit")}>
+                Back to Edit
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setVideoFile(null);
+                  setCloudinaryUrl(null);
+                  setCloudinaryPublicId(null);
+                  setActiveTab("upload");
+                }}
+              >
+                Start New Project
+              </Button>
+            </div>
+          </div>
+        </TabsContent>
+      </Tabs>
+    </div>
   );
 }
 

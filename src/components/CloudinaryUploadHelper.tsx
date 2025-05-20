@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -18,6 +18,7 @@ export default function CloudinaryUploadHelper({
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const cloudName = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME;
@@ -27,6 +28,10 @@ export default function CloudinaryUploadHelper({
     if (file) {
       setVideoFile(file);
       setUploadError(null);
+
+      // Generate thumbnail URL for preview
+      const url = URL.createObjectURL(file);
+      setThumbnailUrl(url);
     }
   };
 
@@ -55,9 +60,11 @@ export default function CloudinaryUploadHelper({
       const formData = new FormData();
       formData.append("file", videoFile);
       formData.append("upload_preset", "video_borders"); // Make sure this preset is created in your Cloudinary dashboard
-      // Add resource_type=auto to handle both images and videos
+      // Explicitly set resource_type to video
       formData.append("resource_type", "video");
       formData.append("cloud_name", cloudName);
+      // Add timestamp to prevent caching issues
+      formData.append("timestamp", Date.now().toString());
 
       console.log("Uploading to Cloudinary with:", {
         cloudName,
@@ -99,7 +106,26 @@ export default function CloudinaryUploadHelper({
               );
               throw new Error("Invalid response from Cloudinary");
             }
-            onUploadSuccess(response.secure_url, response.public_id);
+            // Log the full response for debugging
+            console.log("Full Cloudinary upload response:", response);
+
+            // Wait a moment to ensure Cloudinary has processed the video
+            setTimeout(() => {
+              // Use the secure_url which is guaranteed to work
+              console.log(
+                "Using secure_url from response:",
+                response.secure_url,
+              );
+
+              // Call the success callback with the secure_url
+              onUploadSuccess(response.secure_url, response.public_id);
+
+              // Also log the URL that will be used for verification
+              console.log(
+                "Video should be accessible at:",
+                response.secure_url,
+              );
+            }, 1000); // Wait 1 second before proceeding
           } catch (e) {
             const errorMsg = "Error processing the server response";
             console.error(errorMsg, e);
@@ -154,6 +180,10 @@ export default function CloudinaryUploadHelper({
         }
       };
 
+      // Add a timestamp parameter to bypass cache
+      const timestamp = Math.floor(Date.now() / 1000);
+      formData.append("timestamp", String(timestamp));
+
       // Send the request
       xhr.send(formData);
     } catch (error) {
@@ -164,6 +194,15 @@ export default function CloudinaryUploadHelper({
       setIsUploading(false);
     }
   };
+
+  // Clean up object URLs when component unmounts
+  useEffect(() => {
+    return () => {
+      if (thumbnailUrl) {
+        URL.revokeObjectURL(thumbnailUrl);
+      }
+    };
+  }, [thumbnailUrl]);
 
   return (
     <Card>
@@ -190,7 +229,24 @@ export default function CloudinaryUploadHelper({
 
           {videoFile && (
             <div className="mt-4 p-3 bg-gray-100 rounded-md flex items-center justify-between">
-              <div className="flex items-center">
+              <div className="flex items-center gap-3">
+                {thumbnailUrl && (
+                  <div className="w-12 h-12 rounded overflow-hidden flex-shrink-0">
+                    {videoFile?.type.startsWith("video/") ? (
+                      <video
+                        src={thumbnailUrl}
+                        className="w-full h-full object-cover"
+                        muted
+                      />
+                    ) : (
+                      <img
+                        src={thumbnailUrl}
+                        alt="Preview"
+                        className="w-full h-full object-cover"
+                      />
+                    )}
+                  </div>
+                )}
                 <div className="text-left">
                   <p className="font-medium truncate max-w-xs">
                     {videoFile.name}
@@ -206,6 +262,10 @@ export default function CloudinaryUploadHelper({
                 onClick={(e) => {
                   e.stopPropagation();
                   setVideoFile(null);
+                  if (thumbnailUrl) {
+                    URL.revokeObjectURL(thumbnailUrl);
+                    setThumbnailUrl(null);
+                  }
                 }}
               >
                 <X className="h-4 w-4" />

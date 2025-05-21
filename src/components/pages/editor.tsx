@@ -287,14 +287,15 @@ export default function VideoBorderEditor() {
                   professional-looking frames in just a few clicks.
                 </p>
                 <div className="flex flex-col sm:flex-row gap-4">
-                  <Button
-                    size="lg"
-                    className="bg-black text-white hover:bg-gray-800 w-full sm:w-auto"
-                    onClick={() => fileInputRef.current?.click()}
-                  >
-                    Start Editing Now
-                    <ArrowRight className="ml-2 h-4 w-4" />
-                  </Button>
+                  <Link to="/tempobook/storyboards/da71efbd-f795-49ff-874d-b3313df0fe4d?storyboard=true&type=COMPONENT&framework=VITE">
+                    <Button
+                      size="lg"
+                      className="bg-black text-white hover:bg-gray-800 w-full sm:w-auto"
+                    >
+                      Start Editing Now
+                      <ArrowRight className="ml-2 h-4 w-4" />
+                    </Button>
+                  </Link>
                   <Button
                     variant="outline"
                     size="lg"
@@ -359,7 +360,10 @@ export default function VideoBorderEditor() {
         </section>
 
         {/* Upload Section */}
-        <section className="py-16 md:py-24 bg-gray-50 border-y border-gray-200">
+        <section
+          id="upload-section"
+          className="py-16 md:py-24 bg-gray-50 border-y border-gray-200"
+        >
           <div className="container px-4 mx-auto">
             <div className="text-center mb-12">
               <Badge className="mb-4 bg-gray-200 text-gray-800 hover:bg-gray-300 border-none">

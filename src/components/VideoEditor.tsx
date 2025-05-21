@@ -1,36 +1,36 @@
 import { useState, useRef, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Play, Pause } from "lucide-react";
-import { useLocation } from "react-router-dom";
 
 interface VideoEditorProps {
-  videoFile: File | null;
+  videoUrl?: string;
+  videoFile?: File | null;
   borderWidth?: number;
   borderColor?: string;
 }
 
 export default function VideoEditor({
+  videoUrl: propVideoUrl,
   videoFile: propVideoFile,
   borderWidth = 4,
   borderColor = "white",
 }: VideoEditorProps) {
-  const location = useLocation();
-  const videoFileFromState = location.state?.videoFile;
-  const videoFile = propVideoFile || videoFileFromState;
   const [isPlaying, setIsPlaying] = useState(false);
-  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [localVideoUrl, setLocalVideoUrl] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
-  // Create object URL for the video file
+  // Use provided videoUrl or create object URL for the video file
   useEffect(() => {
-    if (videoFile) {
-      const url = URL.createObjectURL(videoFile);
-      setVideoUrl(url);
+    if (propVideoUrl) {
+      setLocalVideoUrl(propVideoUrl);
+    } else if (propVideoFile) {
+      const url = URL.createObjectURL(propVideoFile);
+      setLocalVideoUrl(url);
       return () => {
         URL.revokeObjectURL(url);
       };
     }
-  }, [videoFile]);
+  }, [propVideoUrl, propVideoFile]);
 
   // Handle play/pause
   const togglePlayPause = () => {
@@ -49,7 +49,7 @@ export default function VideoEditor({
     setIsPlaying(false);
   };
 
-  if (!videoFile || !videoUrl) {
+  if (!localVideoUrl) {
     return (
       <div className="flex items-center justify-center h-64 bg-gray-100 rounded-lg">
         <p className="text-gray-500">No video selected</p>
@@ -61,9 +61,12 @@ export default function VideoEditor({
     <div className="bg-white p-6 rounded-xl shadow-lg">
       <div className="mb-4">
         <h2 className="text-xl font-semibold">Video Preview</h2>
-        <p className="text-sm text-gray-600">
-          {videoFile.name} ({(videoFile.size / (1024 * 1024)).toFixed(2)} MB)
-        </p>
+        {propVideoFile && (
+          <p className="text-sm text-gray-600">
+            {propVideoFile.name} (
+            {(propVideoFile.size / (1024 * 1024)).toFixed(2)} MB)
+          </p>
+        )}
       </div>
 
       {/* Video with border */}
@@ -76,7 +79,7 @@ export default function VideoEditor({
       >
         <video
           ref={videoRef}
-          src={videoUrl}
+          src={localVideoUrl}
           className="w-full h-auto rounded-sm"
           onEnded={handleVideoEnd}
         />

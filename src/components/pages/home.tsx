@@ -32,7 +32,7 @@ import {
   Play,
   Camera,
 } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../../../supabase/auth";
 import { useEffect, useState } from "react";
 import { supabase } from "../../../supabase/supabase";
@@ -92,6 +92,7 @@ interface BorderStyle {
 export default function BorderPostLanding() {
   const { user, signOut } = useAuth();
   const { toast } = useToast();
+  const navigate = useNavigate();
 
   const [plans, setPlans] = useState<Plan[]>([]);
   const [error, setError] = useState("");
@@ -392,7 +393,7 @@ export default function BorderPostLanding() {
                     Sign In
                   </Button>
                 </Link>
-                <Link to="/signup">
+                <Link to="/tempobook/storyboards/558704a3-58e9-4232-a598-621e7697c5e4?storyboard=true&type=COMPONENT&framework=VITE">
                   <Button className="bg-black text-white hover:bg-gray-800">
                     Get Started
                   </Button>
@@ -423,7 +424,7 @@ export default function BorderPostLanding() {
                   professional-looking frames in just a few clicks.
                 </p>
                 <div className="flex flex-col sm:flex-row gap-4">
-                  <Link to="/signup">
+                  <Link to="/tempobook/dynamic/src/components/VideoEditorStoryboard?storyboard=true&type=COMPONENT&framework=VITE">
                     <Button
                       size="lg"
                       className="bg-black text-white hover:bg-gray-800 w-full sm:w-auto"
@@ -598,7 +599,7 @@ export default function BorderPostLanding() {
             </div>
 
             <div className="mt-16 text-center">
-              <Link to="/signup">
+              <Link to="/editor">
                 <Button
                   size="lg"
                   className="bg-black text-white hover:bg-gray-800"
@@ -816,7 +817,7 @@ export default function BorderPostLanding() {
                   their videos with professional borders.
                 </p>
                 <div className="flex flex-col sm:flex-row justify-center gap-4">
-                  <Link to="/signup">
+                  <Link to="/tempobook/storyboards/da71efbd-f795-49ff-874d-b3313df0fe4d?storyboard=true&type=COMPONENT&framework=VITE">
                     <Button
                       size="lg"
                       className="bg-black text-white hover:bg-gray-800 w-full sm:w-auto"
